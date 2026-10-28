@@ -1,0 +1,723 @@
+local env = (getgenv and getgenv()) or _G
+if env.__AutoDefenseUnload then
+	pcall(env.__AutoDefenseUnload)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+
+local Config = {
+	AutoBlock = true,
+	AutoDodge = true,
+	DangerRange = 75,
+	BlockMin = 2.5,
+	BlockMax = 14.5,
+	ReleaseDelay = 0.2,
+	DodgeCooldown = 2,
+	EscapeDistance = 45,
+}
+
+local CHECK_INTERVAL = 0.1
+local BLOCK_KEY = Enum.KeyCode.F
+local MENU_KEY = Enum.KeyCode.RightShift
+
+local BLOCK_EFFECTS = {
+	"CombatTrail", "LapseBlue", "HandTrail", "Shock", "BallFire", "Reserve",
+	"Doors", "TwoFold", "Rabbit", "Spawn", "DivineAttack", "Throw",
+	"FocusStrike", "DrillImpact", "Barrage", "Mucus", "MucusFire",
+	"DismantleFly", "HitGlow",
+	"ReversalRed", "BlackFlash", "RepellingBlackFlash", "CursedStrike",
+	"CrushingBow", "ManjiKick", "Cleave", "Dismantle", "FireArrow",
+	"HammerStrike", "Chainwhip", "NueFlight", "RabbitHole", "Garuda",
+	"GarudaStab", "ShutterDoors", "RoughEnergy", "FeverBreaker",
+	"PachinkoCombo", "LurkingShadow", "PassengerOfDeath", "TwofoldKick",
+}
+
+local DANGER_EFFECTS = {
+	"DomainBurst", "Domain", "RushWind", "HotHands", "WorldSlash",
+	"RitualStart", "EyeTrails", "DivergentFist", "LapseBlueMax", "Purple",
+	"ReversalRedMax",
+	"InfiniteVoid", "MalevolentShrine", "HollowPurple", "IdleDeathGamble",
+	"EmbodimentOfSelfPerfection", "WorldCuttingSlash",
+}
+
+local function toSet(list)
+	local set = {}
+	for _, name in ipairs(list) do
+		set[name] = true
+	end
+	return set
+end
+
+local blockNames = toSet(BLOCK_EFFECTS)
+local dangerNames = toSet(DANGER_EFFECTS)
+
+local connections = {}
+local function track(conn)
+	table.insert(connections, conn)
+	return conn
+end
+
+local blockParts = {}
+local dangerParts = {}
+local dodgedParts = {}
+
+local character = nil
+local rootPart = nil
+local blockHeld = false
+local lastBlockTrigger = 0
+local lastDodge = 0
+local accumulator = 0
+local alive = true
+
+local ui = {} 
+
+local raycastParams = RaycastParams.new()
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function setBlock(down)
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(down, BLOCK_KEY, false, game)
+	end)
+	blockHeld = down
+	if ui.setStatus then
+		if down then
+			ui.setStatus("Đang đỡ đòn", Color3.fromRGB(80, 220, 140))
+		else
+			ui.setStatus("Đang canh", Color3.fromRGB(90, 170, 255))
+		end
+	end
+end
+
+local function releaseBlock()
+	if blockHeld then
+		setBlock(false)
+	end
+end
+
+local function isOwnPart(part)
+	return character ~= nil and part:IsDescendantOf(character)
+end
+
+local function register(obj)
+	if not obj:IsA("BasePart") then
+		return
+	end
+	local name = obj.Name
+	if blockNames[name] then
+		blockParts[obj] = true
+	end
+	if dangerNames[name] then
+		dangerParts[obj] = true
+	end
+end
+
+local function unregister(obj)
+	if obj:IsA("BasePart") then
+		blockParts[obj] = nil
+		dangerParts[obj] = nil
+		dodgedParts[obj] = nil
+	end
+end
+
+track(Workspace.DescendantAdded:Connect(register))
+track(Workspace.DescendantRemoving:Connect(unregister))
+
+task.spawn(function()
+	local count = 0
+	for _, obj in ipairs(Workspace:GetDescendants()) do
+		if not alive then
+			return
+		end
+		register(obj)
+		count += 1
+		if count % 300 == 0 then
+			task.wait()
+		end
+	end
+end)
+
+local function onCharacter(char)
+	character = char
+	rootPart = nil
+	releaseBlock()
+
+	local root = char:WaitForChild("HumanoidRootPart", 10)
+		or char:FindFirstChild("UpperTorso")
+		or char:FindFirstChild("Torso")
+	if character ~= char then
+		return
+	end
+
+	rootPart = root
+	raycastParams.FilterDescendantsInstances = { char }
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.Died:Connect(releaseBlock)
+	end
+end
+
+track(player.CharacterAdded:Connect(onCharacter))
+if player.Character then
+	task.spawn(onCharacter, player.Character)
+end
+
+local function tryDodge(root, now)
+	if now - lastDodge < Config.DodgeCooldown then
+		return
+	end
+
+	for part in pairs(dangerParts) do
+		if part.Parent and not dodgedParts[part] and not isOwnPart(part) then
+			local offset = root.Position - part.Position
+			local dist = offset.Magnitude
+
+			if dist > 0.01 and dist <= Config.DangerRange then
+				dodgedParts[part] = true
+				lastDodge = now
+
+				local target = root.Position + offset.Unit * Config.EscapeDistance
+				local result = Workspace:Raycast(
+					target + Vector3.new(0, 50, 0),
+					Vector3.new(0, -150, 0),
+					raycastParams
+				)
+				local y = result and (result.Position.Y + 2) or root.Position.Y
+
+				root.CFrame = CFrame.new(target.X, y, target.Z) * root.CFrame.Rotation
+				if ui.setStatus then
+					ui.setStatus("Đã né!", Color3.fromRGB(255, 190, 80))
+				end
+				break
+			end
+		end
+	end
+end
+
+local function updateBlock(root, now)
+	local shouldBlock = false
+
+	for part in pairs(blockParts) do
+		if part.Parent and not isOwnPart(part) then
+			local dist = (root.Position - part.Position).Magnitude
+			if dist >= Config.BlockMin and dist <= Config.BlockMax then
+				shouldBlock = true
+				break
+			end
+		end
+	end
+
+	if shouldBlock then
+		lastBlockTrigger = now
+		if not blockHeld then
+			setBlock(true)
+		end
+	elseif blockHeld and (now - lastBlockTrigger) >= Config.ReleaseDelay then
+		setBlock(false)
+	end
+end
+
+track(RunService.Heartbeat:Connect(function(dt)
+	local root = rootPart
+	if not root or not root.Parent then
+		return
+	end
+
+	accumulator += dt
+	if accumulator < CHECK_INTERVAL then
+		return
+	end
+	accumulator -= CHECK_INTERVAL
+
+	local now = os.clock()
+	if Config.AutoDodge then
+		tryDodge(root, now)
+	end
+	if Config.AutoBlock then
+		updateBlock(root, now)
+	else
+		releaseBlock()
+	end
+end))
+
+local THEME = {
+	bg = Color3.fromRGB(16, 16, 22),
+	panel = Color3.fromRGB(26, 26, 36),
+	panel2 = Color3.fromRGB(34, 34, 48),
+	accent = Color3.fromRGB(130, 90, 255),
+	accent2 = Color3.fromRGB(70, 170, 255),
+	text = Color3.fromRGB(236, 236, 245),
+	sub = Color3.fromRGB(140, 140, 165),
+	off = Color3.fromRGB(58, 58, 76),
+}
+
+local function new(class, props, parent)
+	local inst = Instance.new(class)
+	for k, v in pairs(props) do
+		inst[k] = v
+	end
+	if parent then
+		inst.Parent = parent
+	end
+	return inst
+end
+
+local function corner(inst, r)
+	return new("UICorner", { CornerRadius = UDim.new(0, r) }, inst)
+end
+
+local function stroke(inst, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, inst)
+end
+
+local function tween(inst, t, props)
+	TweenService:Create(inst, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+end
+
+local gui = new("ScreenGui", {
+	Name = "AutoDefenseUI",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 999,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+})
+
+local function attachGui()
+	local candidates = {
+		function() return gethui and gethui() end,
+		function() return game:GetService("CoreGui") end,
+		function() return player:WaitForChild("PlayerGui", 10) end,
+	}
+	for _, getParent in ipairs(candidates) do
+		local ok, parent = pcall(getParent)
+		if ok and parent then
+			if syn and syn.protect_gui then
+				pcall(syn.protect_gui, gui)
+			end
+			local okSet = pcall(function()
+				gui.Parent = parent
+			end)
+			if okSet and gui.Parent then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+if not attachGui() then
+	warn("[AutoDefense] Không gắn được GUI vào màn hình.")
+end
+
+local isTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local WIDTH = isTouch and 270 or 300
+local HEIGHT = isTouch and 360 or 420
+
+local main = new("Frame", {
+	Name = "Main",
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(WIDTH, HEIGHT),
+	BackgroundColor3 = THEME.bg,
+	BorderSizePixel = 0,
+	Active = true,
+}, gui)
+corner(main, 14)
+stroke(main, THEME.accent, 1.5, 0.35)
+local mainScale = new("UIScale", { Scale = 1 }, main)
+
+local header = new("Frame", {
+	Name = "Header",
+	Size = UDim2.new(1, 0, 0, 50),
+	BackgroundColor3 = THEME.panel,
+	BorderSizePixel = 0,
+}, main)
+corner(header, 14)
+new("Frame", { 
+	Position = UDim2.new(0, 0, 1, -14),
+	Size = UDim2.new(1, 0, 0, 14),
+	BackgroundColor3 = THEME.panel,
+	BorderSizePixel = 0,
+}, header)
+new("UIGradient", {
+	Color = ColorSequence.new(Color3.fromRGB(44, 34, 84), Color3.fromRGB(26, 36, 64)),
+	Rotation = 20,
+}, header)
+
+new("TextLabel", {
+	BackgroundTransparency = 1,
+	Position = UDim2.fromOffset(14, 7),
+	Size = UDim2.new(1, -110, 0, 20),
+	Text = "AUTO DEFENSE",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 16,
+	TextColor3 = THEME.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+new("TextLabel", {
+	BackgroundTransparency = 1,
+	Position = UDim2.fromOffset(14, 27),
+	Size = UDim2.new(1, -110, 0, 16),
+	Text = "Tự đỡ đòn & né chiêu",
+	Font = Enum.Font.Gotham,
+	TextSize = 12,
+	TextColor3 = THEME.sub,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+
+local function headerButton(text, xOffset, color)
+	local b = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, xOffset, 0.5, 0),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundColor3 = color,
+		BackgroundTransparency = 0.2,
+		Text = text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 16,
+		TextColor3 = THEME.text,
+		AutoButtonColor = true,
+	}, header)
+	corner(b, 8)
+	return b
+end
+
+local closeBtn = headerButton("X", -10, Color3.fromRGB(200, 60, 80))
+local minBtn = headerButton("-", -44, THEME.panel2)
+
+local body = new("ScrollingFrame", {
+	Position = UDim2.fromOffset(0, 58),
+	Size = UDim2.new(1, 0, 1, -88),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 3,
+	ScrollBarImageColor3 = THEME.accent,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, main)
+new("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+new("UIPadding", {
+	PaddingLeft = UDim.new(0, 12),
+	PaddingRight = UDim.new(0, 12),
+	PaddingTop = UDim.new(0, 2),
+	PaddingBottom = UDim.new(0, 8),
+}, body)
+
+local function addSection(order, title)
+	new("TextLabel", {
+		LayoutOrder = order,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 18),
+		Text = string.upper(title),
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = THEME.accent2,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, body)
+end
+
+local function addToggle(order, title, desc, key, onChange)
+	local row = new("Frame", {
+		LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 54),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+	}, body)
+	corner(row, 10)
+
+	new("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 8),
+		Size = UDim2.new(1, -80, 0, 18),
+		Text = title,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	new("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 28),
+		Size = UDim2.new(1, -80, 0, 16),
+		Text = desc,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = THEME.sub,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	local track_ = new("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -12, 0.5, 0),
+		Size = UDim2.fromOffset(44, 24),
+		BackgroundColor3 = THEME.off,
+		BorderSizePixel = 0,
+	}, row)
+	corner(track_, 12)
+	local knob = new("Frame", {
+		Position = UDim2.fromOffset(3, 3),
+		Size = UDim2.fromOffset(18, 18),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, track_)
+	corner(knob, 9)
+
+	local function render(animate)
+		local on = Config[key]
+		local trackColor = on and THEME.accent or THEME.off
+		local knobPos = on and UDim2.fromOffset(23, 3) or UDim2.fromOffset(3, 3)
+		if animate then
+			tween(track_, 0.18, { BackgroundColor3 = trackColor })
+			tween(knob, 0.18, { Position = knobPos })
+		else
+			track_.BackgroundColor3 = trackColor
+			knob.Position = knobPos
+		end
+	end
+	render(false)
+
+	local btn = new("TextButton", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Text = "",
+	}, row)
+	btn.Activated:Connect(function()
+		Config[key] = not Config[key]
+		render(true)
+		if onChange then
+			onChange(Config[key])
+		end
+	end)
+end
+
+local function roundTo(x, decimals)
+	local m = 10 ^ decimals
+	return math.floor(x * m + 0.5) / m
+end
+
+local function addStepper(order, title, key, minV, maxV, step, decimals)
+	local row = new("Frame", {
+		LayoutOrder = order,
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = THEME.panel,
+		BorderSizePixel = 0,
+	}, body)
+	corner(row, 10)
+
+	new("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.new(1, -130, 1, 0),
+		Text = title,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextColor3 = THEME.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+
+	local function stepBtn(text, xOffset)
+		local b = new("TextButton", {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, xOffset, 0.5, 0),
+			Size = UDim2.fromOffset(28, 28),
+			BackgroundColor3 = THEME.panel2,
+			Text = text,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+			TextColor3 = THEME.text,
+		}, row)
+		corner(b, 8)
+		return b
+	end
+
+	local plus = stepBtn("+", -10)
+	local valueLabel = new("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -42, 0.5, 0),
+		Size = UDim2.fromOffset(48, 28),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = THEME.accent2,
+	}, row)
+	local minus = stepBtn("-", -94)
+
+	local function render()
+		valueLabel.Text = tostring(roundTo(Config[key], decimals))
+	end
+	render()
+
+	local function change(delta)
+		Config[key] = math.clamp(roundTo(Config[key] + delta, decimals), minV, maxV)
+		render()
+	end
+	plus.Activated:Connect(function() change(step) end)
+	minus.Activated:Connect(function() change(-step) end)
+end
+
+addSection(1, "Chức năng")
+addToggle(2, "Tự đỡ đòn", "Giữ phím F khi có đòn tới gần", "AutoBlock", function(on)
+	if not on then
+		releaseBlock()
+	end
+end)
+addToggle(3, "Tự né chiêu", "Dịch chuyển khi có chiêu nguy hiểm", "AutoDodge")
+
+addSection(4, "Tùy chỉnh đỡ đòn")
+addStepper(5, "Khoảng cách tối thiểu", "BlockMin", 0, 10, 0.5, 1)
+addStepper(6, "Khoảng cách tối đa", "BlockMax", 5, 40, 0.5, 1)
+addStepper(7, "Thời gian nhả (giây)", "ReleaseDelay", 0.05, 1, 0.05, 2)
+
+addSection(8, "Tùy chỉnh né chiêu")
+addStepper(9, "Phạm vi nguy hiểm", "DangerRange", 20, 200, 5, 0)
+addStepper(10, "Khoảng cách né", "EscapeDistance", 15, 120, 5, 0)
+addStepper(11, "Hồi chiêu né (giây)", "DodgeCooldown", 0.5, 10, 0.5, 1)
+
+local footer = new("Frame", {
+	AnchorPoint = Vector2.new(0, 1),
+	Position = UDim2.fromScale(0, 1),
+	Size = UDim2.new(1, 0, 0, 30),
+	BackgroundColor3 = THEME.panel,
+	BorderSizePixel = 0,
+}, main)
+corner(footer, 14)
+new("Frame", {
+	Size = UDim2.new(1, 0, 0, 14),
+	BackgroundColor3 = THEME.panel,
+	BorderSizePixel = 0,
+}, footer)
+
+local statusDot = new("Frame", {
+	AnchorPoint = Vector2.new(0, 0.5),
+	Position = UDim2.new(0, 14, 0.5, 0),
+	Size = UDim2.fromOffset(8, 8),
+	BackgroundColor3 = THEME.accent2,
+	BorderSizePixel = 0,
+}, footer)
+corner(statusDot, 4)
+local statusLabel = new("TextLabel", {
+	BackgroundTransparency = 1,
+	Position = UDim2.fromOffset(28, 0),
+	Size = UDim2.new(1, -110, 1, 0),
+	Text = "Đang canh",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 12,
+	TextColor3 = THEME.text,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, footer)
+new("TextLabel", {
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -12, 0, 0),
+	Size = UDim2.new(0, 90, 1, 0),
+	BackgroundTransparency = 1,
+	Text = isTouch and "Nút AD: ẩn/hiện" or "RightShift: ẩn/hiện",
+	Font = Enum.Font.Gotham,
+	TextSize = 10,
+	TextColor3 = THEME.sub,
+	TextXAlignment = Enum.TextXAlignment.Right,
+}, footer)
+
+function ui.setStatus(text, color)
+	if statusLabel.Text == text then
+		return
+	end
+	statusLabel.Text = text
+	tween(statusDot, 0.15, { BackgroundColor3 = color })
+end
+
+local bubble = new("TextButton", {
+	Name = "Bubble",
+	Position = UDim2.new(0, 16, 0.5, -24),
+	Size = UDim2.fromOffset(48, 48),
+	BackgroundColor3 = THEME.accent,
+	Text = "AD",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 16,
+	TextColor3 = Color3.new(1, 1, 1),
+	Visible = false,
+	AutoButtonColor = true,
+}, gui)
+corner(bubble, 24)
+stroke(bubble, Color3.new(1, 1, 1), 1.5, 0.6)
+new("UIGradient", {
+	Color = ColorSequence.new(THEME.accent, THEME.accent2),
+	Rotation = 45,
+}, bubble)
+
+local function setOpen(open)
+	if open then
+		main.Visible = true
+		bubble.Visible = false
+		mainScale.Scale = 0.9
+		tween(mainScale, 0.18, { Scale = 1 })
+	else
+		main.Visible = false
+		bubble.Visible = true
+	end
+end
+
+minBtn.Activated:Connect(function() setOpen(false) end)
+bubble.Activated:Connect(function() setOpen(true) end)
+
+local function unload()
+	alive = false
+	releaseBlock()
+	for _, c in ipairs(connections) do
+		pcall(function() c:Disconnect() end)
+	end
+	table.clear(connections)
+	gui:Destroy()
+	env.__AutoDefenseUnload = nil
+end
+env.__AutoDefenseUnload = unload
+closeBtn.Activated:Connect(unload)
+
+track(UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+	if input.KeyCode == MENU_KEY then
+		setOpen(not main.Visible)
+	end
+end))
+
+local dragging, dragStart, startPos = false, nil, nil
+header.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragStart = input.Position
+		startPos = main.Position
+		input.Changed:Connect(function()
+			if input.UserInputState == Enum.UserInputState.End then
+				dragging = false
+			end
+		end)
+	end
+end)
+track(UserInputService.InputChanged:Connect(function(input)
+	if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+		or input.UserInputType == Enum.UserInputType.Touch) then
+		local d = input.Position - dragStart
+		main.Position = UDim2.new(
+			startPos.X.Scale, startPos.X.Offset + d.X,
+			startPos.Y.Scale, startPos.Y.Offset + d.Y
+		)
+	end
+end))
+
+setOpen(true)
+ui.setStatus("Đang canh", THEME.accent2)
