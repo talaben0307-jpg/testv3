@@ -29,6 +29,8 @@ local Config = {
 local CHECK_INTERVAL = 0.1
 local BLOCK_KEY = Enum.KeyCode.F
 local MENU_KEY = Enum.KeyCode.RightShift
+local MAX_HOLD = 1
+local HOLD_LOCKOUT = 0.35
 
 local BLOCK_EFFECTS = {
 	"CombatTrail", "LapseBlue", "HandTrail", "Shock", "BallFire", "Reserve",
@@ -80,6 +82,8 @@ local character = nil
 local rootPart = nil
 local blockHeld = false
 local lastBlockTrigger = 0
+local blockStart = 0
+local lockUntil = 0
 local lastDodge = 0
 local accumulator = 0
 local alive = true
@@ -98,6 +102,9 @@ local function setBlock(down)
 		VirtualInputManager:SendKeyEvent(down, BLOCK_KEY, false, game)
 	end)
 	blockHeld = down
+	if down then
+		blockStart = os.clock()
+	end
 	if ui.setStatus then
 		if down then
 			ui.setStatus(STATUS_BLOCK, Color3.fromRGB(80, 220, 140))
@@ -290,20 +297,24 @@ local function dashThreat(root, now)
 				lastSampleTime[r] = now
 
 				local vel = r.AssemblyLinearVelocity
-				if prevPos and prevTime and now > prevTime then
-					local measured = (pos - prevPos) / (now - prevTime)
-					if measured.Magnitude > vel.Magnitude then
-						vel = measured
+				if prevPos and prevTime then
+					local span = now - prevTime
+					if span >= 0.05 and span <= 0.3 then
+						local measured = (pos - prevPos) / span
+						if measured.Magnitude > vel.Magnitude and measured.Magnitude < 250 then
+							vel = measured
+						end
 					end
 				end
 
 				local offset = root.Position - pos
 				local dist = offset.Magnitude
-				if dist <= Config.DashRange and dist > 0.01 then
+				if dist <= Config.DashRange and dist > Config.BlockMin then
 					local flat = Vector3.new(vel.X, 0, vel.Z)
 					local flatOffset = Vector3.new(offset.X, 0, offset.Z)
 					if flat.Magnitude >= Config.DashSpeed and flatOffset.Magnitude > 0.01 then
-						if flat.Unit:Dot(flatOffset.Unit) > 0.6 then
+						local closing = flat:Dot(flatOffset.Unit)
+						if closing >= Config.DashSpeed * 0.8 and flat.Unit:Dot(flatOffset.Unit) > 0.85 then
 							threat = true
 						end
 					end
@@ -331,6 +342,16 @@ local function updateBlock(root, now)
 
 	if Config.AutoBlockDash and dashThreat(root, now) then
 		shouldBlock = true
+	end
+
+	if blockHeld and (now - blockStart) >= MAX_HOLD then
+		setBlock(false)
+		lockUntil = now + HOLD_LOCKOUT
+		return
+	end
+
+	if now < lockUntil then
+		return
 	end
 
 	if shouldBlock then
