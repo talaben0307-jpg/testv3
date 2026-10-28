@@ -32,6 +32,7 @@ local MENU_KEY = Enum.KeyCode.RightShift
 local MAX_HOLD = 1
 local HOLD_LOCKOUT = 0.35
 local KEY_LOCKOUT = 0.6
+local OWN_WINDOW = 0.8
 
 local BLOCK_EFFECTS = {
 	"CombatTrail", "LapseBlue", "HandTrail", "Shock", "BallFire", "Reserve",
@@ -85,6 +86,7 @@ local blockHeld = false
 local lastBlockTrigger = 0
 local blockStart = 0
 local lockUntil = 0
+local lastOwnInput = 0
 local lastDodge = 0
 local accumulator = 0
 local alive = true
@@ -198,7 +200,10 @@ local function classify(obj)
 	if not obj.Parent then
 		return
 	end
-	if ancestorIsOwn(obj) or nearestCharacterIsOwn(obj) then
+	if ancestorIsOwn(obj) then
+		return
+	end
+	if os.clock() - lastOwnInput <= OWN_WINDOW and nearestCharacterIsOwn(obj) then
 		return
 	end
 	local name = obj.Name
@@ -867,6 +872,13 @@ env.__AutoDefenseUnload = unload
 closeBtn.Activated:Connect(unload)
 
 track(UserInputService.InputBegan:Connect(function(input, processed)
+	local t = input.UserInputType
+	if (t == Enum.UserInputType.Keyboard and input.KeyCode ~= BLOCK_KEY and input.KeyCode ~= MENU_KEY)
+		or t == Enum.UserInputType.MouseButton1
+		or t == Enum.UserInputType.MouseButton2
+		or t == Enum.UserInputType.Touch then
+		lastOwnInput = os.clock()
+	end
 	if processed then
 		return
 	end
