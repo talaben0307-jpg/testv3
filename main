@@ -14,6 +14,7 @@ local player = Players.LocalPlayer
 
 local Config = {
 	AutoBlock = true,
+	AutoBlockDash = true,
 	AutoDodge = true,
 	DangerRange = 75,
 	BlockMin = 2.5,
@@ -21,6 +22,8 @@ local Config = {
 	ReleaseDelay = 0.2,
 	DodgeCooldown = 2,
 	EscapeDistance = 45,
+	DashRange = 25,
+	DashSpeed = 40,
 }
 
 local CHECK_INTERVAL = 0.1
@@ -47,6 +50,8 @@ local DANGER_EFFECTS = {
 	"EmbodimentOfSelfPerfection", "WorldCuttingSlash",
 }
 
+local OWNER_ATTRIBUTES = { "Owner", "Creator", "Caster", "User", "Player" }
+
 local function toSet(list)
 	local set = {}
 	for _, name in ipairs(list) do
@@ -68,6 +73,9 @@ local blockParts = {}
 local dangerParts = {}
 local dodgedParts = {}
 
+local lastPositions = setmetatable({}, { __mode = "k" })
+local lastSampleTime = setmetatable({}, { __mode = "k" })
+
 local character = nil
 local rootPart = nil
 local blockHeld = false
@@ -76,10 +84,14 @@ local lastDodge = 0
 local accumulator = 0
 local alive = true
 
-local ui = {} 
+local ui = {}
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local STATUS_WATCH = "Đang canh / Watching"
+local STATUS_BLOCK = "Đang đỡ / Blocking"
+local STATUS_DODGE = "Đã né / Dodged"
 
 local function setBlock(down)
 	pcall(function()
@@ -88,9 +100,9 @@ local function setBlock(down)
 	blockHeld = down
 	if ui.setStatus then
 		if down then
-			ui.setStatus("Đang đỡ đòn", Color3.fromRGB(80, 220, 140))
+			ui.setStatus(STATUS_BLOCK, Color3.fromRGB(80, 220, 140))
 		else
-			ui.setStatus("Đang canh", Color3.fromRGB(90, 170, 255))
+			ui.setStatus(STATUS_WATCH, Color3.fromRGB(90, 170, 255))
 		end
 	end
 end
@@ -105,8 +117,61 @@ local function isOwnPart(part)
 	return character ~= nil and part:IsDescendantOf(character)
 end
 
-local function register(obj)
-	if not obj:IsA("BasePart") then
+local function ownerMatches(value)
+	if value == nil then
+		return false
+	end
+	return value == player.Name or value == player.UserId or value == player.DisplayName
+end
+
+local function ancestorIsOwn(part)
+	if isOwnPart(part) then
+		return true
+	end
+	local node = part
+	while node and node ~= Workspace do
+		if node.Name == player.Name or node.Name == tostring(player.UserId) then
+			return true
+		end
+		for _, attr in ipairs(OWNER_ATTRIBUTES) do
+			if ownerMatches(node:GetAttribute(attr)) then
+				return true
+			end
+		end
+		local ownerValue = node:FindFirstChild("Owner") or node:FindFirstChild("Creator")
+		if ownerValue and ownerValue:IsA("ObjectValue") and ownerValue.Value then
+			local v = ownerValue.Value
+			if v == player or v == character then
+				return true
+			end
+		end
+		node = node.Parent
+	end
+	return false
+end
+
+local function nearestCharacterIsOwn(part)
+	local bestDist = math.huge
+	local bestIsOwn = false
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local char = plr.Character
+		local r = char and char:FindFirstChild("HumanoidRootPart")
+		if r then
+			local d = (r.Position - part.Position).Magnitude
+			if d < bestDist then
+				bestDist = d
+				bestIsOwn = (plr == player)
+			end
+		end
+	end
+	return bestIsOwn
+end
+
+local function classify(obj)
+	if not obj.Parent then
+		return
+	end
+	if ancestorIsOwn(obj) or nearestCharacterIsOwn(obj) then
 		return
 	end
 	local name = obj.Name
@@ -115,6 +180,16 @@ local function register(obj)
 	end
 	if dangerNames[name] then
 		dangerParts[obj] = true
+	end
+end
+
+local function register(obj)
+	if not obj:IsA("BasePart") then
+		return
+	end
+	local name = obj.Name
+	if blockNames[name] or dangerNames[name] then
+		task.defer(classify, obj)
 	end
 end
 
@@ -175,7 +250,7 @@ local function tryDodge(root, now)
 	end
 
 	for part in pairs(dangerParts) do
-		if part.Parent and not dodgedParts[part] and not isOwnPart(part) then
+		if part.Parent and not dodgedParts[part] then
 			local offset = root.Position - part.Position
 			local dist = offset.Magnitude
 
@@ -193,7 +268,7 @@ local function tryDodge(root, now)
 
 				root.CFrame = CFrame.new(target.X, y, target.Z) * root.CFrame.Rotation
 				if ui.setStatus then
-					ui.setStatus("Đã né!", Color3.fromRGB(255, 190, 80))
+					ui.setStatus(STATUS_DODGE, Color3.fromRGB(255, 190, 80))
 				end
 				break
 			end
@@ -201,17 +276,61 @@ local function tryDodge(root, now)
 	end
 end
 
+local function dashThreat(root, now)
+	local threat = false
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player then
+			local char = plr.Character
+			local r = char and char:FindFirstChild("HumanoidRootPart")
+			if r then
+				local pos = r.Position
+				local prevPos = lastPositions[r]
+				local prevTime = lastSampleTime[r]
+				lastPositions[r] = pos
+				lastSampleTime[r] = now
+
+				local vel = r.AssemblyLinearVelocity
+				if prevPos and prevTime and now > prevTime then
+					local measured = (pos - prevPos) / (now - prevTime)
+					if measured.Magnitude > vel.Magnitude then
+						vel = measured
+					end
+				end
+
+				local offset = root.Position - pos
+				local dist = offset.Magnitude
+				if dist <= Config.DashRange and dist > 0.01 then
+					local flat = Vector3.new(vel.X, 0, vel.Z)
+					local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+					if flat.Magnitude >= Config.DashSpeed and flatOffset.Magnitude > 0.01 then
+						if flat.Unit:Dot(flatOffset.Unit) > 0.6 then
+							threat = true
+						end
+					end
+				end
+			end
+		end
+	end
+	return threat
+end
+
 local function updateBlock(root, now)
 	local shouldBlock = false
 
-	for part in pairs(blockParts) do
-		if part.Parent and not isOwnPart(part) then
-			local dist = (root.Position - part.Position).Magnitude
-			if dist >= Config.BlockMin and dist <= Config.BlockMax then
-				shouldBlock = true
-				break
+	if Config.AutoBlock then
+		for part in pairs(blockParts) do
+			if part.Parent then
+				local dist = (root.Position - part.Position).Magnitude
+				if dist >= Config.BlockMin and dist <= Config.BlockMax then
+					shouldBlock = true
+					break
+				end
 			end
 		end
+	end
+
+	if Config.AutoBlockDash and dashThreat(root, now) then
+		shouldBlock = true
 	end
 
 	if shouldBlock then
@@ -240,7 +359,7 @@ track(RunService.Heartbeat:Connect(function(dt)
 	if Config.AutoDodge then
 		tryDodge(root, now)
 	end
-	if Config.AutoBlock then
+	if Config.AutoBlock or Config.AutoBlockDash then
 		updateBlock(root, now)
 	else
 		releaseBlock()
@@ -318,12 +437,12 @@ local function attachGui()
 end
 
 if not attachGui() then
-	warn("[AutoDefense] Không gắn được GUI vào màn hình.")
+	warn("[AutoDefense] GUI attach failed")
 end
 
 local isTouch = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 local WIDTH = isTouch and 270 or 300
-local HEIGHT = isTouch and 360 or 420
+local HEIGHT = isTouch and 380 or 450
 
 local main = new("Frame", {
 	Name = "Main",
@@ -345,7 +464,7 @@ local header = new("Frame", {
 	BorderSizePixel = 0,
 }, main)
 corner(header, 14)
-new("Frame", { 
+new("Frame", {
 	Position = UDim2.new(0, 0, 1, -14),
 	Size = UDim2.new(1, 0, 0, 14),
 	BackgroundColor3 = THEME.panel,
@@ -371,11 +490,12 @@ new("TextLabel", {
 	BackgroundTransparency = 1,
 	Position = UDim2.fromOffset(14, 27),
 	Size = UDim2.new(1, -110, 0, 16),
-	Text = "Tự đỡ đòn & né chiêu",
+	Text = "Tự đỡ & né / Auto Block & Dodge",
 	Font = Enum.Font.Gotham,
-	TextSize = 12,
+	TextSize = 11,
 	TextColor3 = THEME.sub,
 	TextXAlignment = Enum.TextXAlignment.Left,
+	TextTruncate = Enum.TextTruncate.AtEnd,
 }, header)
 
 local function headerButton(text, xOffset, color)
@@ -429,10 +549,10 @@ local function addSection(order, title)
 	}, body)
 end
 
-local function addToggle(order, title, desc, key, onChange)
+local function addToggle(order, vi, en, key, onChange)
 	local row = new("Frame", {
 		LayoutOrder = order,
-		Size = UDim2.new(1, 0, 0, 54),
+		Size = UDim2.new(1, 0, 0, 50),
 		BackgroundColor3 = THEME.panel,
 		BorderSizePixel = 0,
 	}, body)
@@ -440,23 +560,25 @@ local function addToggle(order, title, desc, key, onChange)
 
 	new("TextLabel", {
 		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(12, 8),
+		Position = UDim2.fromOffset(12, 7),
 		Size = UDim2.new(1, -80, 0, 18),
-		Text = title,
+		Text = vi,
 		Font = Enum.Font.GothamBold,
 		TextSize = 14,
 		TextColor3 = THEME.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, row)
 	new("TextLabel", {
 		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(12, 28),
+		Position = UDim2.fromOffset(12, 26),
 		Size = UDim2.new(1, -80, 0, 16),
-		Text = desc,
+		Text = en,
 		Font = Enum.Font.Gotham,
-		TextSize = 11,
+		TextSize = 12,
 		TextColor3 = THEME.sub,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, row)
 
 	local track_ = new("Frame", {
@@ -508,10 +630,10 @@ local function roundTo(x, decimals)
 	return math.floor(x * m + 0.5) / m
 end
 
-local function addStepper(order, title, key, minV, maxV, step, decimals)
+local function addStepper(order, vi, en, key, minV, maxV, step, decimals)
 	local row = new("Frame", {
 		LayoutOrder = order,
-		Size = UDim2.new(1, 0, 0, 44),
+		Size = UDim2.new(1, 0, 0, 46),
 		BackgroundColor3 = THEME.panel,
 		BorderSizePixel = 0,
 	}, body)
@@ -519,13 +641,25 @@ local function addStepper(order, title, key, minV, maxV, step, decimals)
 
 	new("TextLabel", {
 		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(12, 0),
-		Size = UDim2.new(1, -130, 1, 0),
-		Text = title,
+		Position = UDim2.fromOffset(12, 5),
+		Size = UDim2.new(1, -140, 0, 18),
+		Text = vi,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 13,
 		TextColor3 = THEME.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, row)
+	new("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(12, 24),
+		Size = UDim2.new(1, -140, 0, 16),
+		Text = en,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = THEME.sub,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, row)
 
 	local function stepBtn(text, xOffset)
@@ -568,23 +702,32 @@ local function addStepper(order, title, key, minV, maxV, step, decimals)
 	minus.Activated:Connect(function() change(-step) end)
 end
 
-addSection(1, "Chức năng")
-addToggle(2, "Tự đỡ đòn", "Giữ phím F khi có đòn tới gần", "AutoBlock", function(on)
-	if not on then
+addSection(1, "Chức năng / Features")
+addToggle(2, "Tự đỡ đòn", "Auto Block", "AutoBlock", function(on)
+	if not on and not Config.AutoBlockDash then
 		releaseBlock()
 	end
 end)
-addToggle(3, "Tự né chiêu", "Dịch chuyển khi có chiêu nguy hiểm", "AutoDodge")
+addToggle(3, "Tự đỡ lướt", "Auto Block Dash", "AutoBlockDash", function(on)
+	if not on and not Config.AutoBlock then
+		releaseBlock()
+	end
+end)
+addToggle(4, "Tự né chiêu", "Auto Dodge", "AutoDodge")
 
-addSection(4, "Tùy chỉnh đỡ đòn")
-addStepper(5, "Khoảng cách tối thiểu", "BlockMin", 0, 10, 0.5, 1)
-addStepper(6, "Khoảng cách tối đa", "BlockMax", 5, 40, 0.5, 1)
-addStepper(7, "Thời gian nhả (giây)", "ReleaseDelay", 0.05, 1, 0.05, 2)
+addSection(5, "Đỡ đòn / Block")
+addStepper(6, "Khoảng cách tối thiểu", "Min distance", "BlockMin", 0, 10, 0.5, 1)
+addStepper(7, "Khoảng cách tối đa", "Max distance", "BlockMax", 5, 40, 0.5, 1)
+addStepper(8, "Thời gian nhả (giây)", "Release delay (s)", "ReleaseDelay", 0.05, 1, 0.05, 2)
 
-addSection(8, "Tùy chỉnh né chiêu")
-addStepper(9, "Phạm vi nguy hiểm", "DangerRange", 20, 200, 5, 0)
-addStepper(10, "Khoảng cách né", "EscapeDistance", 15, 120, 5, 0)
-addStepper(11, "Hồi chiêu né (giây)", "DodgeCooldown", 0.5, 10, 0.5, 1)
+addSection(9, "Đỡ lướt / Block Dash")
+addStepper(10, "Tầm phát hiện", "Detect range", "DashRange", 5, 80, 1, 0)
+addStepper(11, "Tốc độ lướt tối thiểu", "Min dash speed", "DashSpeed", 20, 150, 5, 0)
+
+addSection(12, "Né chiêu / Dodge")
+addStepper(13, "Phạm vi nguy hiểm", "Danger range", "DangerRange", 20, 200, 5, 0)
+addStepper(14, "Khoảng cách né", "Escape distance", "EscapeDistance", 15, 120, 5, 0)
+addStepper(15, "Hồi chiêu né (giây)", "Dodge cooldown (s)", "DodgeCooldown", 0.5, 10, 0.5, 1)
 
 local footer = new("Frame", {
 	AnchorPoint = Vector2.new(0, 1),
@@ -611,23 +754,12 @@ corner(statusDot, 4)
 local statusLabel = new("TextLabel", {
 	BackgroundTransparency = 1,
 	Position = UDim2.fromOffset(28, 0),
-	Size = UDim2.new(1, -110, 1, 0),
-	Text = "Đang canh",
+	Size = UDim2.new(1, -40, 1, 0),
+	Text = STATUS_WATCH,
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
 	TextColor3 = THEME.text,
 	TextXAlignment = Enum.TextXAlignment.Left,
-}, footer)
-new("TextLabel", {
-	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -12, 0, 0),
-	Size = UDim2.new(0, 90, 1, 0),
-	BackgroundTransparency = 1,
-	Text = isTouch and "Nút AD: ẩn/hiện" or "RightShift: ẩn/hiện",
-	Font = Enum.Font.Gotham,
-	TextSize = 10,
-	TextColor3 = THEME.sub,
-	TextXAlignment = Enum.TextXAlignment.Right,
 }, footer)
 
 function ui.setStatus(text, color)
@@ -720,4 +852,4 @@ track(UserInputService.InputChanged:Connect(function(input)
 end))
 
 setOpen(true)
-ui.setStatus("Đang canh", THEME.accent2)
+ui.setStatus(STATUS_WATCH, THEME.accent2)
