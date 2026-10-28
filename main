@@ -17,7 +17,7 @@ local Config = {
 	AutoBlockDash = false,
 	AutoDodge = true,
 	DangerRange = 75,
-	BlockMin = 2.5,
+	BlockMin = 1,
 	BlockMax = 14.5,
 	ReleaseDelay = 0.2,
 	DodgeCooldown = 2,
@@ -26,7 +26,7 @@ local Config = {
 	DashSpeed = 40,
 }
 
-local CHECK_INTERVAL = 0.1
+local CHECK_INTERVAL = 0.05
 local BLOCK_KEY = Enum.KeyCode.F
 local MENU_KEY = Enum.KeyCode.RightShift
 local MAX_HOLD = 1
@@ -158,14 +158,33 @@ local function ancestorIsOwn(part)
 	return false
 end
 
+local LIMB_NAMES = {
+	"HumanoidRootPart", "Head", "RightHand", "LeftHand", "Right Arm", "Left Arm",
+	"RightLowerArm", "LeftLowerArm", "RightFoot", "LeftFoot", "Right Leg", "Left Leg",
+}
+
+local function characterDistance(char, pos)
+	local best = math.huge
+	for _, limb in ipairs(LIMB_NAMES) do
+		local p = char:FindFirstChild(limb)
+		if p and p:IsA("BasePart") then
+			local d = (p.Position - pos).Magnitude
+			if d < best then
+				best = d
+			end
+		end
+	end
+	return best
+end
+
 local function nearestCharacterIsOwn(part)
 	local bestDist = math.huge
 	local bestIsOwn = false
+	local pos = part.Position
 	for _, plr in ipairs(Players:GetPlayers()) do
 		local char = plr.Character
-		local r = char and char:FindFirstChild("HumanoidRootPart")
-		if r then
-			local d = (r.Position - part.Position).Magnitude
+		if char then
+			local d = characterDistance(char, pos)
 			if d < bestDist then
 				bestDist = d
 				bestIsOwn = (plr == player)
@@ -185,6 +204,14 @@ local function classify(obj)
 	local name = obj.Name
 	if blockNames[name] then
 		blockParts[obj] = true
+		local root = rootPart
+		if Config.AutoBlock and root and root.Parent and not blockHeld and os.clock() >= lockUntil then
+			local dist = (root.Position - obj.Position).Magnitude
+			if dist >= Config.BlockMin and dist <= Config.BlockMax then
+				lastBlockTrigger = os.clock()
+				setBlock(true)
+			end
+		end
 	end
 	if dangerNames[name] then
 		dangerParts[obj] = true
@@ -300,7 +327,7 @@ local function dashThreat(root, now)
 				local vel = r.AssemblyLinearVelocity
 				if prevPos and prevTime then
 					local span = now - prevTime
-					if span >= 0.05 and span <= 0.3 then
+					if span >= 0.04 and span <= 0.3 then
 						local measured = (pos - prevPos) / span
 						if measured.Magnitude > vel.Magnitude and measured.Magnitude < 250 then
 							vel = measured
