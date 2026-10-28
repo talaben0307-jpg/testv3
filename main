@@ -14,7 +14,7 @@ local player = Players.LocalPlayer
 
 local Config = {
 	AutoBlock = true,
-	AutoBlockDash = true,
+	AutoBlockDash = false,
 	AutoDodge = true,
 	DangerRange = 75,
 	BlockMin = 2.5,
@@ -31,6 +31,7 @@ local BLOCK_KEY = Enum.KeyCode.F
 local MENU_KEY = Enum.KeyCode.RightShift
 local MAX_HOLD = 1
 local HOLD_LOCKOUT = 0.35
+local KEY_LOCKOUT = 0.6
 
 local BLOCK_EFFECTS = {
 	"CombatTrail", "LapseBlue", "HandTrail", "Shock", "BallFire", "Reserve",
@@ -840,6 +841,13 @@ closeBtn.Activated:Connect(unload)
 
 track(UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.Keyboard
+		and input.KeyCode ~= BLOCK_KEY
+		and input.KeyCode ~= MENU_KEY then
+		releaseBlock()
+		lockUntil = os.clock() + KEY_LOCKOUT
 		return
 	end
 	if input.KeyCode == MENU_KEY then
